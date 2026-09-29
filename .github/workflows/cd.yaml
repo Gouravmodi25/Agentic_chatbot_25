@@ -1,25 +1,79 @@
+# name: CD
+
+# on:
+#   workflow_run:
+#     workflows: ["CI"]
+#     types:
+#       - completed
+
+# jobs:
+#   deploy:
+#     if: ${{ github.event.workflow_run.conclusion == 'success' }}
+#     runs-on: ubuntu-latest
+
+#     steps:
+#       - name: Deploy backend service on Render
+#         run: |
+#           curl -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_BACKEND_SERVICE_ID }}/deploys" \
+#             -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+#             -H "Content-Type: application/json"
+
+#       - name: Deploy UI service on Render
+#         run: |
+#           curl -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_UI_SERVICE_ID }}/deploys" \
+#             -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+#             -H "Content-Type: application/json"
+
+
 name: CD
 
 on:
   workflow_run:
     workflows: ["CI"]
-    types:
-      - completed
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
-    steps:
-      - name: Deploy backend service on Render
-        run: |
-          curl -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_BACKEND_SERVICE_ID }}/deploys" \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            -H "Content-Type: application/json"
+    env:
+      # Image names must match the image configured in each Render service.
+      # If your UI service uses a different image, change UI_IMAGE_NAME.
+      BACKEND_IMAGE_NAME: agentic-chatbot
+      UI_IMAGE_NAME: agentic-chatbot
+      # The exact commit that CI built and pushed
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      OWNER: ${{ github.repository_owner }}
 
-      - name: Deploy UI service on Render
+    steps:
+      - name: Deploy new image to Render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          BACKEND_SERVICE_ID: ${{ secrets.RENDER_BACKEND_SERVICE_ID }}
+          UI_SERVICE_ID: ${{ secrets.RENDER_UI_SERVICE_ID }}
         run: |
-          curl -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_UI_SERVICE_ID }}/deploys" \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            -H "Content-Type: application/json"
+          set -euo pipefail
+
+          OWNER_LC=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+
+          deploy() {
+            local label="$1" service_id="$2" image="$3"
+            echo "::group::Deploy $label"
+            echo "Service: $service_id"
+            echo "Image:   $image"
+            # --fail-with-body: the step fails AND prints Render's error message
+            curl --fail-with-body -sS -X POST \
+              "https://api.render.com/v1/services/${service_id}/deploys" \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              -H "Accept: application/json" \
+              -H "Content-Type: application/json" \
+              -d "{\"clearCache\":\"do_not_clear\",\"imageUrl\":\"${image}\"}"
+            echo
+            echo "::endgroup::"
+          }
+
+          deploy "backend" "$BACKEND_SERVICE_ID" "ghcr.io/${OWNER_LC}/${BACKEND_IMAGE_NAME}:${SHA}"
+          deploy "ui"      "$UI_SERVICE_ID"      "ghcr.io/${OWNER_LC}/${UI_IMAGE_NAME}:${SHA}"
